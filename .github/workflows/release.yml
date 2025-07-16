@@ -1,0 +1,82 @@
+name: Release Automation PoC
+
+on:
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Capture last tag and HEAD commit
+        id: snapshot
+        run: |
+          echo "from_tag=$(git describe --tags --abbrev=0 || echo '')" >> $GITHUB_OUTPUT
+          echo "to_commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Notify Slack (release started)
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_DEPLOYING }} \
+          -H 'Content-type: application/json' \
+          --data '{
+            "text": ":rocket: Release starting for commit `${{ steps.snapshot.outputs.to_commit }}`"
+          }'
+
+      - name: Fake Deploy Step
+        run: |
+          echo "Deploying to production..."
+          sleep 5  # simulate deploy
+
+      - name: Determine Next Version
+        id: version
+        run: |
+          latest="${{ steps.snapshot.outputs.from_tag }}"
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            base=$(echo $latest | cut -d. -f1-2)
+            patch=$(echo $latest | cut -d. -f3)
+            next="$base.$((patch + 1))"
+          fi
+          echo "version=$next" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          from="${{ steps.snapshot.outputs.from_tag }}"
+          to="${{ steps.snapshot.outputs.to_commit }}"
+          if [ -z "$from" ]; then
+            log=$(git log --pretty=format:"- %s")
+          else
+            log=$(git log "$from..$to" --pretty=format:"- %s")
+          fi
+          echo "changelog<<EOF" >> $GITHUB_ENV
+          echo "$log" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: ${{ env.changelog }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Slack (release complete)
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_RELEASE }} \
+          -H 'Content-type: application/json' \
+          --data '{
+            "text": ":tada: *Release ${{ steps.version.outputs.version }}* completed!\n\n*Changelog:*\n${{ env.changelog }}"
+          }'
+
